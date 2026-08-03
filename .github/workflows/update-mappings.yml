@@ -1,0 +1,151 @@
+name: Update Mappings.json
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "usmap/**/*.usmap"
+
+permissions:
+  contents: write
+
+jobs:
+  update-mappings:
+    runs-on: ubuntu-latest
+    # Avoid re-running when this workflow commits Mappings.json
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Enough history to diff the full push range
+          fetch-depth: 0
+
+      - name: Resolve newest committed .usmap
+        id: usmap
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          zero="0000000000000000000000000000000000000000"
+          if [ "$BEFORE" = "$zero" ] || [ -z "$BEFORE" ]; then
+            range="HEAD~1..HEAD"
+          else
+            range="${BEFORE}..${AFTER}"
+          fi
+
+          mapfile -t changed < <(
+            git diff --name-only --diff-filter=AM "$range" -- 'usmap/*.usmap' 2>/dev/null || true
+          )
+
+          # Fallback: single-commit shallow compare
+          if [ "${#changed[@]}" -eq 0 ] || [ -z "${changed[0]:-}" ]; then
+            mapfile -t changed < <(
+              git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'usmap/*.usmap' 2>/dev/null || true
+            )
+          fi
+
+          if [ "${#changed[@]}" -eq 0 ] || [ -z "${changed[0]:-}" ]; then
+            echo "No added/modified .usmap files in this push; nothing to update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed .usmap files:"
+          printf '  %s\n' "${changed[@]}"
+
+          latest=""
+          latest_cl=-1
+          for path in "${changed[@]}"; do
+            name="$(basename "$path")"
+            [[ "$name" == *.usmap ]] || continue
+            cl="$(echo "$name" | sed -nE 's/^[^0-9]*[0-9]+\.[0-9]+\.[0-9]+-([0-9]+).*/\1/p')"
+            cl="${cl:-0}"
+            if [ "$cl" -gt "$latest_cl" ]; then
+              latest_cl="$cl"
+              latest="$name"
+            fi
+          done
+
+          if [ -z "$latest" ]; then
+            echo "Could not resolve a .usmap file name."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Selected: $latest (CL=$latest_cl)"
+          echo "file_name=$latest" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Update Mappings.json
+        if: steps.usmap.outputs.skip != 'true'
+        shell: bash
+        env:
+          FILE_NAME: ${{ steps.usmap.outputs.file_name }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          export UPLOADED="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          export URL="https://github.com/${REPOSITORY}/raw/refs/heads/${REF_NAME}/usmap/${FILE_NAME}"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          file_name = os.environ["FILE_NAME"]
+          uploaded = os.environ["UPLOADED"]
+          url = os.environ["URL"]
+
+          path = Path("Mappings.json")
+          payload = [
+              {
+                  "url": url,
+                  "fileName": file_name,
+                  "uploaded": uploaded,
+              }
+          ]
+
+          if path.exists():
+              try:
+                  current = json.loads(path.read_text(encoding="utf-8"))
+                  if (
+                      isinstance(current, list)
+                      and len(current) == 1
+                      and current[0].get("fileName") == file_name
+                      and current[0].get("url") == url
+                  ):
+                      print("Mappings.json already points at this file; skipping write.")
+                      raise SystemExit(0)
+              except json.JSONDecodeError:
+                  pass
+
+          path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          print(f"Updated Mappings.json -> {file_name}")
+          PY
+
+      - name: Commit and push Mappings.json
+        if: steps.usmap.outputs.skip != 'true'
+        shell: bash
+        env:
+          FILE_NAME: ${{ steps.usmap.outputs.file_name }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- Mappings.json; then
+            echo "No Mappings.json changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Mappings.json
+          git commit -m "Update Mappings.json for ${FILE_NAME}"
+          git push
