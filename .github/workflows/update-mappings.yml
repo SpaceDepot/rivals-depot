@@ -78,7 +78,25 @@ jobs:
             exit 0
           fi
 
-          echo "Selected: $latest (CL=$latest_cl)"
+          extract_cl() {
+            echo "$1" | sed -nE 's/^[^0-9]*[0-9]+\.[0-9]+\.[0-9]+-([0-9]+).*/\1/p'
+          }
+
+          current_name=""
+          if [ -f Mappings.json ]; then
+            current_name="$(python3 -c "import json; d=json.load(open('Mappings.json')); print(d[0].get('fileName','') if isinstance(d,list) and d else '')" 2>/dev/null || true)"
+          fi
+
+          current_cl="$(extract_cl "${current_name}")"
+          current_cl="${current_cl:-0}"
+
+          if [ -n "$current_name" ] && [ "$latest_cl" -le "$current_cl" ]; then
+            echo "Ignoring $latest (CL=$latest_cl); current mapping is $current_name (CL=$current_cl)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Selected: $latest (CL=$latest_cl); current was ${current_name:-none} (CL=$current_cl)"
           echo "file_name=$latest" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
