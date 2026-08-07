@@ -30,34 +30,41 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          zero="0000000000000000000000000000000000000000"
-          if [ "$BEFORE" = "$zero" ] || [ -z "$BEFORE" ]; then
-            range="HEAD~1..HEAD"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual run: reconcile against every usmap file on disk, not just the push range.
+            echo "Manual trigger: scanning all committed .usmap files for the newest one."
+            mapfile -t changed < <(find usmap -type f -name '*.usmap' 2>/dev/null | sort || true)
           else
-            range="${BEFORE}..${AFTER}"
-          fi
+            zero="0000000000000000000000000000000000000000"
+            if [ "$BEFORE" = "$zero" ] || [ -z "$BEFORE" ]; then
+              range="HEAD~1..HEAD"
+            else
+              range="${BEFORE}..${AFTER}"
+            fi
 
-          mapfile -t changed < <(
-            git diff --name-only --diff-filter=AM "$range" -- 'usmap/*.usmap' 2>/dev/null || true
-          )
-
-          # Fallback: single-commit shallow compare
-          if [ "${#changed[@]}" -eq 0 ] || [ -z "${changed[0]:-}" ]; then
             mapfile -t changed < <(
-              git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'usmap/*.usmap' 2>/dev/null || true
+              git diff --name-only --diff-filter=AM "$range" -- 'usmap/*.usmap' 2>/dev/null || true
             )
+
+            # Fallback: single-commit shallow compare
+            if [ "${#changed[@]}" -eq 0 ] || [ -z "${changed[0]:-}" ]; then
+              mapfile -t changed < <(
+                git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'usmap/*.usmap' 2>/dev/null || true
+              )
+            fi
           fi
 
           if [ "${#changed[@]}" -eq 0 ] || [ -z "${changed[0]:-}" ]; then
-            echo "No added/modified .usmap files in this push; nothing to update."
+            echo "No .usmap files found to consider; nothing to update."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Changed .usmap files:"
+          echo "Considering .usmap files:"
           printf '  %s\n' "${changed[@]}"
 
           latest=""
